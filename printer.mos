@@ -1,0 +1,187 @@
+model ModelName
+  uses "mmxprs"
+
+  declarations
+    Timesteps : integer
+    Orders: integer
+    OU: integer
+    ResourceTypes: integer
+    filename: string
+  end-declarations
+
+filename := "final_run_9.dat"
+
+initialisations from filename
+  Timesteps Orders OU ResourceTypes
+end-initialisations
+
+  declarations
+    TimestepsIter = 1..Timesteps
+    OrdersIter = 1..Orders
+    OUIter = 1..OU
+    OUExIter = 1..OU + 1
+    ResourceTypesIter = 1..ResourceTypes
+
+    Volumes : array(OrdersIter) of integer
+    OrderRelease : array(OrdersIter) of integer
+    OrderDue : array(OrdersIter) of integer
+    Freeze: array(OrdersIter) of integer
+    MinimumDuration: array(OrdersIter) of integer
+    ResourceOUTime: array(ResourceTypesIter, OUIter, TimestepsIter) of integer
+    OrderCost: array(OrdersIter, ResourceTypesIter) of integer
+  end-declarations
+
+
+  initialisations from filename
+    Volumes
+    OrderRelease
+    OrderDue
+    Freeze
+    MinimumDuration
+    ResourceOUTime
+    OrderCost
+  end-initialisations
+
+
+  declarations
+    FrozenOrders = sum(i in OrdersIter) Freeze(i)
+    FrozenOrdersIter = 1..FrozenOrders
+    FrozenOU: array(FrozenOrdersIter) of integer
+
+    alpha : array(OrdersIter) of mpvar
+    x: array(OrdersIter, OUExIter, TimestepsIter, TimestepsIter) of mpvar
+  end-declarations
+
+
+  initialisations from filename
+    FrozenOU
+  end-initialisations
+
+  ! Binary constraint
+  forall (i in OrdersIter) do
+    alpha(i) is_binary
+    forall(k in OUExIter, s in TimestepsIter, e in TimestepsIter) do
+      x(i,k,s,e) is_binary
+    end-do
+  end-do
+
+
+  ! First constraint:
+  ! Ensure that each order has one organizational unit and one end and start date.
+  forall( i in OrdersIter) do
+    sum(k in OUExIter, s in TimestepsIter, e in TimestepsIter) x(i,k,s,e) = 1
+  end-do
+
+  ! Second constraint:
+  ! Ensure that all orders start after their release date.
+  forall(i in OrdersIter | Freeze(i)=0) do
+    sum(k in OUExIter, s in TimestepsIter, e in TimestepsIter) s*x(i,k,s,e) >= OrderRelease(i)
+  end-do
+
+  !Third constraint:
+  ! Ensure that all orders end before their due date.
+  forall(i in OrdersIter | Freeze(i)=0) do
+    sum(k in OUExIter, s in TimestepsIter, e in TimestepsIter) e*x(i,k,s,e) <= OrderDue(i)
+  end-do
+
+  ! Fourth constraint
+  ! Ensure that all orders take at least their minimum duration
+  forall(i in OrdersIter | Freeze(i) =0) do
+    sum(k in OUExIter, s in TimestepsIter, e in TimestepsIter) (e-s+1)*x(i,k,s,e) >= MinimumDuration(i)
+  end-do
+
+  ! Fifth constraint:
+  ! Check whether the order is produced in an internal OU or external OU
+  ! If it is produced internal, set alpha(i) to 1
+  forall(i in OrdersIter) do
+    sum(k in OUIter, s in TimestepsIter, e in TimestepsIter| k<OU) x(i,k,s,e) = alpha(i)
+  end-do
+
+  ! Sixth constraint:
+  ! Ensures not more resources than maximally allowed are used.
+  forall(g in ResourceTypesIter, k in OUIter, t in TimestepsIter) do
+    sum(i in OrdersIter, s in TimestepsIter| s<=t, e in TimestepsIter|  e>=t) (1/(e-s+1))*OrderCost(i,g)*x(i,k,s,e) <= ResourceOUTime(g,k,t)
+  end-do
+
+  ! Seventh constraint:
+  ! Put all the frozen orders at the place they are required to go
+  sumFrozen := 0
+  forall(i in OrdersIter | Freeze(i)=1) do
+    sumFrozen := sumFrozen +1
+    x(i,FrozenOU(sumFrozen),OrderRelease(i),OrderDue(i)) = 1
+  end-do
+
+
+  ! Objective function
+  Total_order_volume_inhouse := sum(i in OrdersIter) alpha(i)*Volumes(i)
+
+  maximise(Total_order_volume_inhouse)
+
+
+
+
+
+  if(getprobstat = XPRS_OPT) then
+    writeln(getobjval)
+    forall (i in OrdersIter,k in OUExIter, s in TimestepsIter, e in TimestepsIter) do
+      if (getsol(x(i,k,s,e))>=0.9) then
+        writeln("Order ", i, " is executed in OU ", k, " starting at time ", s, " and ending at time ",e,".")
+      end-if
+    end-do
+  else
+    writeln
+    writeln("Not solved to optimality")
+    writeln
+    forall (i in OrdersIter,k in OUExIter, s in TimestepsIter, e in TimestepsIter) do
+      if (getsol(x(i,k,s,e))>=0.9) then
+        writeln("Order ", i, " is executed in OU ", k, " starting at time ", s, " and ending at time ",e,".")
+      end-if
+    end-do
+  end-if
+
+
+
+  temp := 0
+  forall(i in OrdersIter,k in OUExIter, s in TimestepsIter, e in TimestepsIter) do
+    if (getsol(x(i,k,s,e))>=0.9) then
+      temp := e - s + temp
+    end-if
+  end-do
+
+  temp_int := 0
+  forall(i in OrdersIter,k in OUExIter, s in TimestepsIter, e in TimestepsIter) do
+    if (getsol(x(i,k,s,e))>=0.9) then
+      temp_int := e - s + temp_int
+    end-if
+  end-do
+
+  writeln("--------------")
+
+  writeln((100/Orders) * getsol(sum(i in OrdersIter)alpha(i)))
+  writeln(sum(i in OrdersIter) (getsol(alpha(i)) * OrderCost(i,2))/ (sum(u in OUIter) ResourceOUTime(2,u,1) * Timesteps) *100)
+  writeln(sum(i in OrdersIter) (getsol(alpha(i)) * OrderCost(i,1))/ (sum(u in OUIter) ResourceOUTime(1,u,1) * Timesteps) *100)
+  writeln(getsol(sum(i in OrdersIter)alpha(i)))
+
+
+  writeln(temp_int/sum(o in OrdersIter) getsol(alpha(o)))
+  if (Orders - sum(o in OrdersIter) getsol(alpha(o))) > 0 then
+    writeln((temp - temp_int)/(Orders - sum(o in OrdersIter) getsol(alpha(o))))
+  else
+    writeln("NONE")
+  end-if
+  writeln("MORE INT EXT")
+
+  writeln(sum(i in OrdersIter) (getsol(alpha(i)) * OrderCost(i,2))/ sum(k in OrdersIter) (getsol(alpha(k))))
+
+  if (Orders - sum(o in OrdersIter) getsol(alpha(o))) > 0 then
+    writeln(sum(i in OrdersIter) ((1 - getsol(alpha(i))) * OrderCost(i,2))/ sum(k in OrdersIter) (1 -getsol(alpha(k))))
+  else
+    writeln("NONE")
+  end-if
+  writeln("MORE INT EXT")
+
+  writeln(sum(i in OrdersIter) (getsol(alpha(i)) * OrderCost(i,2))/Timesteps)
+  writeln(sum(i in OrdersIter) (( (1 - getsol(alpha(i)))  * OrderCost(i,2)) /Timesteps))
+  writeln("MORE INT EXT")
+
+end-model
